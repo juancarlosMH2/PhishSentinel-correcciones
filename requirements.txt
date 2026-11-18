@@ -8,3 +8,5 @@ beautifulsoup4
 lxml
 requests
 pyinstaller
+customtkinter==6.0.0
+pillow>=10
