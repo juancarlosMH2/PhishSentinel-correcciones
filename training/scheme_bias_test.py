@@ -12,13 +12,14 @@ from pathlib import Path
 import pandas as pd
 
 from phishsentinel.engine import Engine
+from phishsentinel.features_url import normalize_url
 
 RAW = Path("data/raw")
 PROCESSED = Path("data/processed/urls.csv")
 
 
 def rate_flagged(eng, urls):
-    return sum(eng.analyze(u, fetch=False).level != "segura" for u in urls) / max(len(urls), 1)
+    return sum(eng.analyze(u, fetch=False, log=False).level != "segura" for u in urls) / max(len(urls), 1)
 
 
 def main():
@@ -28,12 +29,12 @@ def main():
 
     eng = Engine()
     big = pd.read_csv(RAW / "URL dataset.csv", usecols=["url", "type"])
-    used = set(pd.read_csv(PROCESSED, usecols=["url"])["url"])
+    used = set(map(normalize_url, pd.read_csv(PROCESSED, usecols=["url"])["url"]))
     rnd = random.Random(3)
 
-    legit = sorted(set(big.loc[big["type"] == "legitimate", "url"]) - used)
+    legit = sorted(u for u in set(big.loc[big["type"] == "legitimate", "url"]) if normalize_url(u) not in used)
     legit = rnd.sample(legit, min(a.n, len(legit)))
-    phish = sorted(set(big.loc[big["type"] == "phishing", "url"]) - used)
+    phish = sorted(u for u in set(big.loc[big["type"] == "phishing", "url"]) if normalize_url(u) not in used)
     phish = [u for u in phish if u.startswith("http://")]
     phish = rnd.sample(phish, min(a.n, len(phish)))
 

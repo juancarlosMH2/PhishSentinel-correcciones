@@ -3,9 +3,9 @@ from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('models', 'models'), ('assets', 'assets')]
+datas = [('models/model_url.joblib', 'models'), ('assets', 'assets')]
 binaries = []
-hiddenimports = []
+hiddenimports = ['phishsentinel.model']   # el modelo se carga con joblib: PyInstaller no ve este import
 datas += collect_data_files('tldextract')
 hiddenimports += collect_submodules('sklearn')
 tmp_ret = collect_all('xgboost')

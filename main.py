@@ -42,7 +42,8 @@ LEVELS = {   # nivel: (fuerte, suave, barra, ícono, título)
     "sospechosa": ("#B45309", "#FDF3E3", "#E59A1B", "alerta", "SOSPECHOSA"),
     "peligrosa": ("#B91C1C", "#FDEAEA", "#D64545", "x", "PELIGROSA"),
 }
-THREATS = {"ninguna": "ninguna", "phishing": "phishing", "xss": "XSS (código inyectado)"}
+THREATS = {"ninguna": "ninguna", "phishing": "phishing", "malware": "malware (descarga maliciosa)",
+           "xss": "XSS (código inyectado)"}
 
 
 def zone_color(score):
@@ -132,6 +133,7 @@ class App(ctk.CTk):
         self.q = queue.Queue()
         self.last_clip, self.current, self.busy, self.alert = "", None, False, None
         self.url_var, self.watch_var = tk.StringVar(), tk.BooleanVar(value=False)
+        self.deep_var = tk.BooleanVar(value=False)
         self.wrap_labels = []
 
         self._header()
@@ -210,10 +212,14 @@ class App(ctk.CTk):
                                  font=self.f["bodyb"], fg_color=ACCENT, hover_color=ACCENT_DARK, text_color="#FFFFFF",
                                  text_color_disabled="#FFFFFF", corner_radius=8, height=46, width=132, command=self.on_analyze)
         self.btn.pack(side="left", padx=(10, 0))
+        ctk.CTkSwitch(card, text="Análisis profundo: consultar siempre la capa 2 (descarga la página y revela tu IP al sitio)",
+                      variable=self.deep_var, onvalue=True, offvalue=False, font=self.f["small"], text_color=MUTED,
+                      progress_color=ACCENT, fg_color="#C3CBD6", button_color="#FFFFFF", button_hover_color="#F3F5F8",
+                      switch_width=36, switch_height=20).pack(anchor="w", padx=18, pady=(12, 0))
         ctk.CTkSwitch(card, text="Vigilar portapapeles: analiza cada enlace que copies y avisa si es riesgoso",
                       variable=self.watch_var, onvalue=True, offvalue=False, font=self.f["small"], text_color=MUTED,
                       progress_color=ACCENT, fg_color="#C3CBD6", button_color="#FFFFFF", button_hover_color="#F3F5F8",
-                      switch_width=36, switch_height=20).pack(anchor="w", padx=18, pady=(12, 16))
+                      switch_width=36, switch_height=20).pack(anchor="w", padx=18, pady=(8, 16))
 
     def _result(self, parent):
         self.res = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
@@ -405,9 +411,11 @@ class App(ctk.CTk):
             self._layer(self.l1_val, self.l1_bar, self.l1_note, f"{v.url_score:.0%} de probabilidad de ser maliciosa".replace("%", " %"),
                         v.url_score, f"{v.ms_url:.0f} ms")
         if v.content_score is None:
-            skipped = any("ya es claramente maliciosa" in r for r in v.reasons)
-            self._layer(self.l2_val, self.l2_bar, self.l2_note, "Página no revisada", None,
-                        "No se descargó: la URL ya es claramente maliciosa" if skipped else "No se pudo descargar: decide solo la capa 1", "info")
+            txt = " ".join(v.reasons)
+            note = ("No se descargó: la URL ya es claramente maliciosa" if "ya es claramente maliciosa" in txt
+                    else "No se consultó: la URL no muestra señales de riesgo" if "no se consultó" in txt
+                    else "No se pudo descargar: decide solo la capa 1")
+            self._layer(self.l2_val, self.l2_bar, self.l2_note, "Página no revisada", None, note, "info")
         else:
             self._layer(self.l2_val, self.l2_bar, self.l2_note, f"Riesgo del contenido: {fmt(v.content_score)}", v.content_score,
                         f"{v.ms_content:.0f} ms · HTML estático, sin ejecutar JavaScript")
@@ -439,7 +447,7 @@ class App(ctk.CTk):
 
     def _work(self, url, source):
         try:
-            self.q.put((self.engine.analyze(url), source))
+            self.q.put((self.engine.analyze(url, deep=self.deep_var.get()), source))
         except Exception as exc:                      # no tumbar la app por un error de red/parseo
             log.exception("Error analizando %s", url)
             self.q.put((exc, source))

@@ -1,4 +1,16 @@
-"""Motor de decisión: combina capa 1 (URL + ML) y capa 2 (contenido)."""
+"""Motor de decisión v2: capa 1 (URL + ML) y capa 2 (contenido) con zona de duda.
+
+    p1 = probabilidad de que la URL sea maliciosa (capa 1)
+
+      p1 <  T_LOW        ──►  segura       (la capa 1 deja pasar; no se contacta el sitio)
+      p1 >= T_HIGH       ──►  peligrosa    (la capa 1 bloquea directo; no se contacta el sitio)
+      T_LOW <= p1 < T_HIGH ─►  ZONA DE DUDA: se descarga el HTML y MANDA LA CAPA 2
+                              puntaje = 0.35*p1 + 0.65*contenido
+
+    T_LOW y T_HIGH están calibrados con datos de validación y guardados dentro del modelo.
+    "Análisis profundo": además consulta la capa 2 fuera de la zona de duda (solo puede SUBIR el puntaje).
+    Un código inyectado en la URL (XSS) NUNCA se anula con una excepción de dominio.
+"""
 import time
 from dataclasses import dataclass, field
 
@@ -6,28 +18,33 @@ import joblib
 
 from . import config, storage
 from .features_content import analyze_content
-from .features_url import FEATURE_NAMES, extract_url_features, host_of, to_vector
-from .fetcher import fetch_html
+from .features_url import extract_url_features, has_xss_signal, host_of, is_platform_host, registered_domain
+from .popular_domains import POPULAR_DOMAINS
+from .domain_age import age_bonus, domain_age_days
+from .fetcher import fetch_page
 
 
 @dataclass
 class Verdict:
     url: str
     level: str                 # segura | sospechosa | peligrosa
-    threat: str                # ninguna | phishing | xss
+    threat: str                # ninguna | phishing | malware | xss
     score: float
     reasons: list = field(default_factory=list)
     ms_url: float = 0.0
     ms_content: float = 0.0
     used_model: bool = False
-    url_score: float = 0.0             # lo que dijo la capa 1 sola (0-1)
-    content_score: float = None        # lo que dijo la capa 2 sola; None si no se revisó la página
+    url_score: float = 0.0     # probabilidad de la capa 1 (0-1)
+    content_score: float = None  # riesgo de contenido de la capa 2 (None = no consultada)
+    zone: str = ""             # baja | duda | alta | excepcion
+    decided_by: str = ""       # capa 1 | capa 2 | excepcion | ambas
+    content_checked: bool = False
 
 
 def _heuristic(f: dict) -> float:
     """Respaldo cuando todavía no hay modelo entrenado."""
     s = 0.35 * f["has_ip"] + 0.25 * f["has_at"] + 0.15 * f["punycode"] + 0.10 * min(f["susp_words"], 3) / 3
-    s += 0.15 * (f["n_subdomains"] >= 3) + 0.10 * (not f["https"]) + 0.10 * f["shortener"]
+    s += 0.15 * (f["n_subdomains"] >= 3) + 0.10 * f["shortener"] + 0.20 * f["brand_in_subdomain"]
     s += 0.5 * max(f["xss_tag"], f["xss_event"], f["xss_js_scheme"])
     return min(s, 1.0)
 
@@ -40,119 +57,162 @@ def _reasons_url(f: dict) -> list:
     if f["shortener"]: r.append("Acortador de enlaces: no se ve el destino real")
     if f["n_subdomains"] >= 3: r.append("Demasiados subdominios")
     if f["susp_words"] >= 2: r.append("Palabras típicas de phishing en la URL (login, verify, secure...)")
-    if not f["https"]: r.append("No usa HTTPS")
-    if f["xss_tag"] or f["xss_event"] or f["xss_js_scheme"] or f["xss_func"]:
-        r.append("La URL contiene código que parece JavaScript/HTML inyectado")
-    if f["double_enc"]: r.append("Doble codificación de caracteres (técnica de ofuscación)")
     kind = f.get("_brand_kind", "")
-    if kind == "contiene": r.append("El dominio usa el nombre de una marca, pero no es el dominio oficial de esa marca")
-    if kind == "disfraza": r.append("El dominio imita una marca con letras o números parecidos (p. ej. 0 en vez de o)")
-    if kind == "casi_igual": r.append("El dominio está escrito casi igual que el de una marca conocida (typosquatting)")
+    if kind == "disfraza":
+        r.append("Imita el nombre de una marca con números, símbolos o punycode (p. ej. bancol0mbia)")
+    elif kind == "casi_igual":
+        r.append("Nombre casi igual al de una marca conocida (posible typosquatting)")
+    elif kind == "contiene":
+        r.append("Usa el nombre de una marca conocida, pero el dominio no es el oficial")
+    elif f["brand_in_subdomain"] or f["brand_in_path"] or f["brand_in_domain_mismatch"]:
+        r.append("Menciona una marca conocida pero el dominio real es otro (posible suplantación)")
+    if f["susp_tld"]: r.append("Extensión de dominio muy usada en campañas de abuso")
+    if f["ext_risky"]: r.append("Apunta a un archivo ejecutable o comprimido")
+    if f["query_has_url"]: r.append("Lleva otra dirección web dentro de los parámetros (redirección)")
+    if has_xss_signal(f): r.append("La URL contiene código que parece JavaScript/HTML inyectado")
+    if f["double_enc"]: r.append("Doble codificación de caracteres (técnica de ofuscación)")
     return r
-
-
-def _level(score: float) -> str:
-    return ("peligrosa" if score >= config.T_DANGEROUS
-            else "sospechosa" if score >= config.T_SUSPICIOUS else "segura")
-
-
-_RANK = {"segura": 0, "sospechosa": 1, "peligrosa": 2}
-
-
-def load_bundle(path):
-    """Carga el modelo. Los XGBoost se guardan en su formato nativo (UBJSON) dentro del bundle,
-    porque el pickle de XGBoost puede fallar al pasar de una máquina o versión de Python a otra."""
-    bundle = joblib.load(path)
-    if bundle.get("xgb_model") is not None:
-        from xgboost import XGBClassifier
-        clf = XGBClassifier()
-        clf.load_model(bytearray(bundle["xgb_model"]))
-        bundle["model"] = clf
-    return bundle
 
 
 class Engine:
     def __init__(self):
-        self.bundle = load_bundle(config.MODEL_PATH) if config.MODEL_PATH.exists() else None
-        if self.bundle and list(self.bundle.get("features", [])) != FEATURE_NAMES:
-            # Modelo entrenado con otra versión de las características: usarlo daría basura.
-            print("[aviso] el modelo no coincide con las características actuales; "
-                  "reentrena con: python -m training.train. Se usan las reglas heurísticas.")
-            self.bundle = None
+        self.bundle = joblib.load(config.MODEL_PATH) if config.MODEL_PATH.exists() else None
+        th = (self.bundle or {}).get("thresholds") or {}
+        self.t_low = float(th.get("low", config.T_LOW_DEFAULT))
+        self.t_high = float(th.get("high", config.T_HIGH_DEFAULT))
 
-    def _url_proba(self, f: dict):
+    # ---- capa 1 ----
+    def _url_proba(self, url: str, f: dict):
         """Devuelve (probabilidad de ser maliciosa, amenaza más probable)."""
-        xss_sig = any(f[k] for k in ("xss_tag", "xss_event", "xss_js_scheme", "xss_func"))
+        xss_sig = has_xss_signal(f)
         if self.bundle is None:
             return _heuristic(f), ("xss" if xss_sig else "phishing")
         classes = self.bundle["classes"]
-        proba = self.bundle["model"].predict_proba([to_vector(f)])[0]
+        proba = self.bundle["model"].predict_one(url, f)
         p_mal = 1.0 - proba[classes.index("legitimate")]
         mal = {c: p for c, p in zip(classes, proba) if c != "legitimate"}
         top = max(mal, key=mal.get)
         if top == "malicious":                         # modelo binario: inferimos el tipo
             top = "xss" if xss_sig else "phishing"
+        # una etiqueta <script> o un manejador onerror=... dentro de la URL es inyección casi siempre
+        if f["xss_tag"] or f["xss_event"]:
+            p_mal, top = max(p_mal, 0.85), "xss"
         return float(p_mal), top
 
-    def analyze(self, url: str, html: str = None, fetch: bool = True) -> Verdict:
+    @staticmethod
+    def _whitelisted(host: str) -> bool:
+        parts = host.split(".")
+        return any(storage.is_whitelisted(".".join(parts[i:])) for i in range(max(len(parts) - 1, 1)))
+
+    def zone_of(self, p1: float) -> str:
+        return "alta" if p1 >= self.t_high else "baja" if p1 < self.t_low else "duda"
+
+    def analyze(self, url: str, html: str = None, fetch: bool = True, deep: bool = False,
+                log: bool = True) -> Verdict:
         host = host_of(url)
         t0 = time.perf_counter()
         f = extract_url_features(url)
-        xss_sig = any(f[k] for k in ("xss_tag", "xss_event", "xss_js_scheme", "xss_func"))
-        if host and storage.is_whitelisted(host) and not xss_sig:
-            return Verdict(url, "segura", "ninguna", 0.0, ["Dominio en tu lista de excepciones"])
-        p_url, threat = self._url_proba(f)
+        xss_sig = has_xss_signal(f)
+        if host and not xss_sig and self._whitelisted(host):
+            return Verdict(url, "segura", "ninguna", 0.0, ["Dominio en tu lista de excepciones"],
+                           zone="excepcion", decided_by="excepcion")
+        p1, threat = self._url_proba(url, f)
+        zone = self.zone_of(p1)
+        # Reputación: en un dominio muy popular la URL sola no basta para bloquear (suele ser un
+        # identificador opaco de un documento/correo). Debe confirmarlo la capa 2.
+        platform = is_platform_host(host)
+        popular = (zone == "alta" and not xss_sig and not f["has_ip"] and not f["_brand_kind"]
+                   and (platform or registered_domain(host) in POPULAR_DOMAINS))
+        if popular:
+            zone = "duda"
         url_reasons = _reasons_url(f)
+        if self.bundle:
+            head1 = (f"Capa 1 (URL): {p1:.0%} de probabilidad de ser maliciosa "
+                     f"(zona {zone}; la duda va de {self.t_low:.0%} a {self.t_high:.0%})")
+        else:
+            head1 = "Capa 1 (URL): reglas heurísticas (sin modelo entrenado)"
+        layer1 = [head1] + ["    " + r for r in url_reasons]
         ms_url = (time.perf_counter() - t0) * 1000
 
-        score, ms_content, c_reasons, extra, c_score = p_url, 0.0, None, [], None
-        skipped = html is None and fetch and p_url >= config.SKIP_FETCH_ABOVE
-        if html is None and fetch and not skipped:
-            html = fetch_html(url)
+        html_was_allowed = html is None and (zone == "duda" or deep)     # modo en vivo (no con HTML dado)
+        score, ms_content, decided, content_ok, c_score = p1, 0.0, "capa 1", False, None
+        layer2 = []
+        final_url, want_fetch = url, html is None and fetch and (zone == "duda" or deep)
+        if want_fetch:
+            html, final_url = fetch_page(url)
+            final_url = final_url or url
+            if not html:
+                layer2 = ["Capa 2 (contenido): no se pudo descargar la página (sitio caído, bloqueado o no es HTML); "
+                          "decide solo la capa 1"]
+        elif html is None:
+            layer2 = ["Capa 2 (contenido): no se descargó la página: la URL ya es claramente maliciosa"
+                      if zone == "alta" else
+                      "Capa 2 (contenido): no se consultó: la URL no muestra señales de riesgo "
+                      "(activa el análisis profundo para revisarla igual)"]
         if html:
             t1 = time.perf_counter()
-            c_score, cf, c_reasons = analyze_content(html, url)
-            # Prioridad a la capa 2: el contenido manda. Una página limpia SÍ puede bajar el
-            # puntaje de una URL que solo "se ve rara" (p. ej. URLs largas legítimas).
-            score = config.W_URL * p_url + config.W_CONTENT * c_score
+            c_score, cf, c_reasons = analyze_content(html, final_url)
+            content_ok = True
+            mixed = config.W_URL_GRAY * p1 + config.W_CONTENT_GRAY * c_score
+            if zone == "duda":                         # AQUÍ MANDA LA CAPA 2
+                score, decided = mixed, "capa 2"
+                if c_score >= config.CONTENT_CERTAIN:
+                    score = max(score, config.T_DANGEROUS)
+                elif c_score >= config.CONTENT_STRONG:
+                    score = max(score, config.T_SUSPICIOUS + 0.05)
+            else:                                      # extremos: el contenido solo puede subir el puntaje
+                score = max(p1, mixed)
+                if score > p1:
+                    decided = "ambas"
             if cf["reflected_params"]:
-                score, threat = max(score, 0.85), "xss"
-            elif cf["pw_form_external"] or cf["brand_impersonation"]:
-                score, threat = max(score, 0.85), "phishing"
-            elif p_url >= config.URL_ALONE_FLOOR and score < config.T_SUSPICIOUS and not f["_official_brand"]:
-                # (no aplica a dominios oficiales de marcas: ahí no hay suplantación que esconder)
-                score = config.T_SUSPICIOUS               # la capa 1 sola solo advierte
-                extra.append(f"La URL es muy sospechosa ({p_url:.0%}) y el contenido no confirmó el ataque: "
-                             "queda como sospechosa, no como peligrosa")
+                score, threat, decided = max(score, 0.85), "xss", "capa 2"
+            if cf["pw_form_external"] or cf["pw_form_ip"] or cf["brand_title_mismatch"]:
+                threat = "phishing"
+            if c_reasons:
+                layer2 = [f"Capa 2 (contenido): riesgo {c_score:.2f}; señales encontradas en la página"] + \
+                         ["    " + r for r in c_reasons]
+            else:
+                layer2 = ["Capa 2 (contenido): la página no muestra señales de ataque"
+                          + ("; reduce la sospecha de la capa 1" if zone == "duda" and p1 >= 0.3 else "")]
             ms_content = (time.perf_counter() - t1) * 1000
 
-        level = _level(score)
-        # ---- motivos: primero la conclusión, luego qué dijo cada capa ----
-        reasons = []
-        if level == "segura" and score >= config.T_NEAR:
-            reasons.append(f"Puntaje cercano al límite ({score:.2f}): revisa el enlace antes de ingresar datos")
-        url_level = _level(p_url)
-        if c_reasons is not None and _RANK[url_level] > _RANK[level] and not extra:
-            reasons.append(f"La URL sola parece {url_level} ({p_url:.0%}), pero el contenido de la página no lo "
-                           f"confirma. Decide el contenido, que pesa el {config.W_CONTENT:.0%}")
-        elif c_reasons is not None and _RANK[level] > _RANK[url_level]:
-            reasons.append("El contenido de la página mostró señales de ataque que la URL sola no tenía")
-        reasons += extra
-        what = (f"el modelo estima {p_url:.0%} de probabilidad de que sea maliciosa" if self.bundle
-                else f"reglas heurísticas, puntaje {p_url:.2f}")
-        reasons.append(f"Capa 1 (URL): {what}")
-        reasons += [f"    {r}" for r in url_reasons]
-        if c_reasons is None:
-            reasons.append("Capa 2 (contenido): no se descargó la página porque la URL ya es claramente maliciosa"
-                           if skipped else
-                           "Capa 2 (contenido): no se pudo revisar la página, así que decide solo la URL")
-        elif c_reasons:
-            reasons.append(f"Capa 2 (contenido): {len(c_reasons)} señal(es) de riesgo en la página")
-            reasons += [f"    {r}" for r in c_reasons]
+        # antigüedad del dominio: solo en la zona de duda (o análisis profundo), solo puede subir el puntaje
+        if config.USE_DOMAIN_AGE and fetch and html_was_allowed and zone != "alta" and not popular \
+                and host and not f["has_ip"]:
+            t2 = time.perf_counter()
+            bonus, why = age_bonus(domain_age_days(registered_domain(host)))
+            ms_content += (time.perf_counter() - t2) * 1000
+            if bonus:
+                score = min(1.0, score + bonus)
+                if layer2:
+                    layer2.append("    " + why)
+                else:
+                    layer2 = ["Capa 2 (contenido): antigüedad del dominio", "    " + why]
+                if decided == "capa 1":
+                    decided = "ambas"
+        if popular and not (content_ok and c_score is not None and c_score >= config.CONTENT_STRONG):
+            score = min(score, config.T_DANGEROUS - 0.01)       # sin evidencia de contenido: a lo sumo 'sospechosa'
+        if zone == "alta":
+            level = "peligrosa"
         else:
-            reasons.append("Capa 2 (contenido): la página no mostró señales de ataque")
-        v = Verdict(url, level, threat if level != "segura" else "ninguna", round(score, 3),
-                    reasons, ms_url, ms_content, self.bundle is not None, round(p_url, 3),
-                    None if c_score is None else round(c_score, 3))
-        storage.log_detection(v)
+            level = ("peligrosa" if score >= config.T_DANGEROUS
+                     else "sospechosa" if score >= config.T_SUSPICIOUS else "segura")
+        lead = []
+        if zone == "duda" and content_ok:
+            lead.append(f"Zona de duda de la capa 1: decidió la capa 2 (contenido), con más peso "
+                        f"({config.W_CONTENT_GRAY:.0%} contenido · {config.W_URL_GRAY:.0%} URL)")
+        elif popular:
+            lead.append("Plataforma de alojamiento gratuita (cualquiera publica ahí): la URL sola no basta para "
+                        "bloquear; la confirma el contenido" if platform else
+                        "Dominio muy popular: la URL por sí sola no basta para bloquear; la confirma el contenido")
+        elif zone == "alta":
+            lead.append("La capa 1 es suficiente: la URL es claramente maliciosa")
+        if level == "segura" and score >= config.T_NEAR:
+            lead.append(f"Puntaje cercano al límite de 'sospechosa' ({config.T_SUSPICIOUS:.2f}): "
+                        "abre el enlace con cuidado")
+        v = Verdict(url, level, threat if level != "segura" else "ninguna", round(float(score), 3),
+                    lead + layer1 + layer2, ms_url, ms_content, self.bundle is not None, round(p1, 3),
+                    None if c_score is None else round(float(c_score), 3), zone, decided, content_ok)
+        if log:
+            storage.log_detection(v)
         return v

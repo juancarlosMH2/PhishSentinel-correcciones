@@ -1,0 +1,134 @@
+{
+  "umbrales": {
+    "T_LOW": 0.0314,
+    "T_HIGH": 0.8799
+  },
+  "modelo": "XGBoost",
+  "prueba": {
+    "f1_macro": 0.8867702272028981,
+    "falsos_positivos_argmax": 0.09550561797752809,
+    "por_clase": {
+      "legitimate": {
+        "precision": 0.8022554419092578,
+        "recall": 0.9044943820224719,
+        "f1-score": 0.8503127171646977,
+        "support": 10146.0
+      },
+      "malware": {
+        "precision": 0.9616588419405321,
+        "recall": 0.8117569352708058,
+        "f1-score": 0.8803724928366762,
+        "support": 3028.0
+      },
+      "phishing": {
+        "precision": 0.8580764622590131,
+        "recall": 0.7877212278772123,
+        "f1-score": 0.82139505786675,
+        "support": 10001.0
+      },
+      "xss": {
+        "precision": 0.9951282051282051,
+        "recall": 0.994873109459113,
+        "f1-score": 0.9950006409434687,
+        "support": 3901.0
+      },
+      "accuracy": 0.8640124095139607,
+      "macro avg": {
+        "precision": 0.904279737809252,
+        "recall": 0.8747114136574008,
+        "f1-score": 0.8867702272028981,
+        "support": 27076.0
+      },
+      "weighted avg": {
+        "precision": 0.868488865204047,
+        "recall": 0.8640124095139607,
+        "f1-score": 0.8638392011636989,
+        "support": 27076.0
+      }
+    }
+  },
+  "tranco_todos": {
+    "n": 10000,
+    "pasa_directo(p<T_LOW)": 0.468,
+    "zona_duda": 0.5318,
+    "bloqueo_directo(p>=T_HIGH)": 0.0002,
+    "marcada_con_umbral_0.5": 0.0071
+  },
+  "tranco_no vistos en entrenamiento": {
+    "n": 9633,
+    "pasa_directo(p<T_LOW)": 0.46527561507318593,
+    "zona_duda": 0.534516765285996,
+    "bloqueo_directo(p>=T_HIGH)": 0.00020761964081802137,
+    "marcada_con_umbral_0.5": 0.0073704972490397595
+  },
+  "largas_REALES >=100 car. (dominios no vistos)": {
+    "n": 3138,
+    "pasa_directo(p<T_LOW)": 0.8295092415551306,
+    "zona_duda": 0.16379859783301465,
+    "bloqueo_directo(p>=T_HIGH)": 0.006692160611854685,
+    "marcada_con_umbral_0.5": 0.021351179094964947
+  },
+  "largas_sint\u00e9ticas sobre Tranco de prueba (optimista)": {
+    "n": 3000,
+    "pasa_directo(p<T_LOW)": 0.948,
+    "zona_duda": 0.051666666666666666,
+    "bloqueo_directo(p>=T_HIGH)": 0.0003333333333333333,
+    "marcada_con_umbral_0.5": 0.004
+  },
+  "legitimas_cortas_prueba": {
+    "n": 7008,
+    "pasa_directo(p<T_LOW)": 0.4891552511415525,
+    "zona_duda": 0.4795947488584475,
+    "bloqueo_directo(p>=T_HIGH)": 0.03125,
+    "marcada_con_umbral_0.5": 0.1312785388127854
+  },
+  "recall_phishing con ruta": {
+    "n": 9271,
+    "pasa_directo(p<T_LOW)": 0.011109912630784166,
+    "zona_duda": 0.6847157803904649,
+    "bloqueo_directo(p>=T_HIGH)": 0.3041743069787509,
+    "marcada_con_umbral_0.5": 0.8276345593787078
+  },
+  "recall_phishing solo dominio": {
+    "n": 730,
+    "pasa_directo(p<T_LOW)": 0.052054794520547946,
+    "zona_duda": 0.684931506849315,
+    "bloqueo_directo(p>=T_HIGH)": 0.26301369863013696,
+    "marcada_con_umbral_0.5": 0.4506849315068493
+  },
+  "recall_phishing fuente phishtank": {
+    "n": 5033,
+    "pasa_directo(p<T_LOW)": 0.009537055434134712,
+    "zona_duda": 0.7772700178819789,
+    "bloqueo_directo(p>=T_HIGH)": 0.21319292668388634,
+    "marcada_con_umbral_0.5": 0.8301212000794754
+  },
+  "recall_phishing fuente mphish": {
+    "n": 2456,
+    "pasa_directo(p<T_LOW)": 0.021986970684039087,
+    "zona_duda": 0.7328990228013029,
+    "bloqueo_directo(p>=T_HIGH)": 0.24511400651465798,
+    "marcada_con_umbral_0.5": 0.6946254071661238
+  },
+  "recall_phishing fuente urlds": {
+    "n": 2512,
+    "pasa_directo(p<T_LOW)": 0.01552547770700637,
+    "zona_duda": 0.45222929936305734,
+    "bloqueo_directo(p>=T_HIGH)": 0.5322452229299363,
+    "marcada_con_umbral_0.5": 0.8431528662420382
+  },
+  "recall_malware": {
+    "n": 3028,
+    "pasa_directo(p<T_LOW)": 0.009907529722589167,
+    "zona_duda": 0.11723910171730516,
+    "bloqueo_directo(p>=T_HIGH)": 0.8728533685601056,
+    "marcada_con_umbral_0.5": 0.9332892998678997
+  },
+  "recall_xss": {
+    "n": 3901,
+    "pasa_directo(p<T_LOW)": 0.0007690335811330429,
+    "zona_duda": 0.0066649577031530375,
+    "bloqueo_directo(p>=T_HIGH)": 0.9925660087157139,
+    "marcada_con_umbral_0.5": 0.9956421430402461
+  }
+}

@@ -33,8 +33,8 @@ def main():
     ok = 0
     for url, fname, expected in CASES:
         html = (HTML / fname).read_text(encoding="utf-8")
-        v1 = eng.analyze(url, fetch=False)
-        v2 = eng.analyze(url, html=html)
+        v1 = eng.analyze(url, fetch=False, log=False)
+        v2 = eng.analyze(url, html=html, log=False)
         hit = v2.level == expected
         ok += hit
         print(f"{'OK ' if hit else 'MAL'} {fname:<28} capa1={v1.level:<10} ({v1.score:.2f})  "

@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from phishsentinel.engine import Engine
+from phishsentinel.features_url import normalize_url
 
 RAW = Path("data/raw")
 CURATED = Path("data/eval/urls_largas_legitimas.txt")
@@ -21,7 +22,7 @@ MIN_LEN = 100
 def evaluate(eng, urls, title, show=0, label="Falsos positivos"):
     lv, flagged = Counter(), []
     for u in urls:
-        v = eng.analyze(u, fetch=False)
+        v = eng.analyze(u, fetch=False, log=False)
         lv[v.level] += 1
         if v.level != "segura":
             flagged.append((v.score, u))
@@ -49,15 +50,15 @@ def main():
     evaluate(eng, curated, "URLs largas legítimas escritas a mano", show=15)
 
     big = pd.read_csv(RAW / "URL dataset.csv", usecols=["url", "type"])
-    used = set(pd.read_csv(PROCESSED, usecols=["url"])["url"])
+    used = set(map(normalize_url, pd.read_csv(PROCESSED, usecols=["url"])["url"]))
     pool = big.loc[(big["type"] == "legitimate") & (big["url"].str.len() >= MIN_LEN), "url"]
-    pool = sorted(set(pool) - used)
+    pool = sorted(u for u in set(pool) if normalize_url(u) not in used)
     sample = random.Random(7).sample(pool, min(a.n, len(pool)))
     evaluate(eng, sample, f"URLs legítimas de {MIN_LEN}+ caracteres no vistas en el entrenamiento")
 
     # Control: bajar falsos positivos no puede costar dejar pasar el phishing largo.
     ph = big.loc[(big["type"] == "phishing") & (big["url"].str.len() >= MIN_LEN), "url"]
-    ph = sorted(set(ph) - used)
+    ph = sorted(u for u in set(ph) if normalize_url(u) not in used)
     ph = random.Random(8).sample(ph, min(a.n, len(ph)))
     evaluate(eng, ph, f"CONTROL: phishing de {MIN_LEN}+ caracteres no visto (aquí 'segura' es un error)",
              label="Recall en phishing largo")

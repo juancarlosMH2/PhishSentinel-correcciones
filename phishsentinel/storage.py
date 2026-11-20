@@ -10,6 +10,7 @@ def _conn():
     c = sqlite3.connect(DB_PATH)
     c.execute("CREATE TABLE IF NOT EXISTS detections(ts REAL, url TEXT, level TEXT, threat TEXT, score REAL)")
     c.execute("CREATE TABLE IF NOT EXISTS whitelist(domain TEXT PRIMARY KEY)")
+    c.execute("CREATE TABLE IF NOT EXISTS domain_age(domain TEXT PRIMARY KEY, days INTEGER, checked REAL)")
     return c
 
 
@@ -31,3 +32,13 @@ def add_whitelist(domain: str):
 def recent(n: int = 50):
     with closing(_conn()) as c:
         return c.execute("SELECT ts,url,level,threat,score FROM detections ORDER BY ts DESC LIMIT ?", (n,)).fetchall()
+
+
+def get_age(domain: str):
+    with closing(_conn()) as c:
+        return c.execute("SELECT days, checked FROM domain_age WHERE domain=?", (domain,)).fetchone()
+
+
+def set_age(domain: str, days: int):
+    with closing(_conn()) as c, c:
+        c.execute("INSERT OR REPLACE INTO domain_age VALUES (?,?,?)", (domain, days, time.time()))

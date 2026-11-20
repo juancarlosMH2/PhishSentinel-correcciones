@@ -1,5 +1,9 @@
-/build/
-/dist/
 __pycache__/
-*.py[cod]
+*.pyc
 .venv/
+build/
+dist/
+data/processed/*
+!data/processed/.gitkeep
+data/html/
+html_legitimas.zip

@@ -1,56 +1,41 @@
-"""Tasa de falsos positivos sobre dominios populares reales (Tranco).
-Todo dominio popular es, en principio, legítimo: cada alerta es un falso positivo.
-Uso:  python -m training.tranco_fp_test --n 10000"""
-import argparse
+"""Falsos positivos de la capa 1 sobre dominios populares reales (Tranco 20,001-30,000, nunca usados
+para entrenar ni para calibrar). Todo dominio popular es, en principio, legítimo: cada alerta es un FP.
+Uso:  python -m training.tranco_fp_test"""
 from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 
 from phishsentinel.engine import Engine
-
-TRANCO = Path("data/raw/tranco.csv")
+from training.common import tranco_block
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=10_000)
-    a = ap.parse_args()
-
-    if not TRANCO.exists():
-        raise SystemExit(f"No existe {TRANCO}. Descarga la lista Tranco y guárdala ahí.")
-
-    full = pd.read_csv(TRANCO, header=None, names=["rank", "domain"], nrows=30_000)
-    doms = full["domain"].tolist()[20_000:30_000]
+    if not Path("data/raw/tranco.csv").exists():
+        raise SystemExit("No existe data/raw/tranco.csv. Descarga la lista Tranco y guárdala ahí.")
+    doms = tranco_block("test")
     eng = Engine()
-    print(f"Modelo: {eng.bundle['name'] if eng.bundle else 'SIN modelo (heurística)'}")
-    print(f"Analizando {len(doms)} dominios, solo capa 1 (sin descargar HTML)...")
-
-    levels, threats, flagged = Counter(), Counter(), []
-    for i, d in enumerate(doms, 1):
-        v = eng.analyze("https://" + d, fetch=False)
+    print(f"Modelo: {eng.bundle['name'] if eng.bundle else 'SIN modelo (heurística)'} · "
+          f"zona de duda {eng.t_low:.0%}–{eng.t_high:.0%}")
+    print(f"Analizando {len(doms)} dominios, SOLO capa 1 (sin descargar HTML)...")
+    zones, levels, flagged = Counter(), Counter(), []
+    for d in doms:
+        v = eng.analyze("https://" + d, fetch=False, log=False)
+        zones[v.zone] += 1
         levels[v.level] += 1
         if v.level != "segura":
-            threats[v.threat] += 1
-            flagged.append((d, v.level, v.threat, v.score))
-        if i % 1000 == 0:
-            print(f"  {i}/{len(doms)}")
-
+            flagged.append((d, v.zone, v.level, v.threat, v.score))
     n = len(doms)
-    print("\n=== Resultados ===")
-    for lvl in ["segura", "sospechosa", "peligrosa"]:
-        print(f"{lvl:>10}: {levels[lvl]:>6}  ({levels[lvl] / n:.2%})")
-    fp = (n - levels["segura"]) / n
-    print(f"\nTasa de falsos positivos (no segura): {fp:.2%}")
-    print(f"Por amenaza: {dict(threats)}")
-
+    print("\n=== Resultados (solo capa 1) ===")
+    for z in ("baja", "duda", "alta"):
+        print(f"zona {z:>5}: {zones[z]:>6}  ({zones[z] / n:.2%})")
+    print(f"\nBloqueo directo por capa 1 (peligrosa): {levels['peligrosa'] / n:.2%}")
+    print(f"Marcadas 'no segura' sin capa 2 (peligrosa+sospechosa): {(n - levels['segura']) / n:.2%}")
+    print("La zona de duda se resuelve con la capa 2: mídela con  python -m training.tranco_layer2_test")
     if flagged:
         out = Path("models") / "falsos_positivos_tranco.csv"
-        pd.DataFrame(flagged, columns=["dominio", "nivel", "amenaza", "score"]).to_csv(out, index=False)
-        print(f"Lista de casos marcados guardada en {out}")
-        print("Primeros 10:")
-        for row in flagged[:10]:
-            print("  ", row)
+        pd.DataFrame(flagged, columns=["dominio", "zona", "nivel", "amenaza", "score"]).to_csv(out, index=False)
+        print(f"Casos marcados guardados en {out}")
 
 
 if __name__ == "__main__":
